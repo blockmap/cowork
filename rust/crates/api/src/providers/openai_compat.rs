@@ -955,7 +955,7 @@ fn wire_model_for_base_url<'a>(
         if config.provider_name == "OpenAI" && trimmed_base_url != default_openai {
             // Only preserve the full slug if it's NOT a model we want to strip
             if !model.contains("gemini") && !model.contains("gemma") {
-                return Cow::Borrowed(model);
+                return Cow::Borrowed(&model[pos + 1..]);
             }
         }
         return Cow::Borrowed(&model[pos + 1..]);
