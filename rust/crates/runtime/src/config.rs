@@ -605,6 +605,11 @@ impl RuntimeFeatureConfig {
         &self.trusted_roots
     }
 
+    #[must_use]
+    pub fn request_options(&self) -> &RequestOptions {
+        &self.request_options
+    }
+
     /// Merge this config's default trusted roots with per-call roots.
     #[must_use]
     pub fn trusted_roots_with_overrides(&self, per_call_roots: &[String]) -> Vec<String> {
