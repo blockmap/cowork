@@ -225,7 +225,10 @@ fn main() {
             let (short_reason, inline_hint) = split_error_hint(&message);
             // #781: fall back to a kind-derived hint when the message has no \n-delimited hint
             let hint = inline_hint.or_else(|| fallback_hint_for_error_kind(kind).map(String::from));
-            eprintln!(
+            // #819/#820/#823: JSON mode error envelopes must go to stdout so machine
+            // consumers can parse failures from stdout byte 0 (parity with all
+            // non-interactive command guards that already use println! / to_stdout).
+            println!(
                 "{}",
                 serde_json::json!({
                     "type": "error",
@@ -268,7 +271,11 @@ Run `claw --help` for usage."
 /// matching against the error messages produced throughout the CLI surface.
 fn classify_error_kind(message: &str) -> &'static str {
     // Check specific patterns first (more specific before generic)
-    if message.contains("missing Anthropic credentials") {
+    if message.starts_with("unknown_slash_command:") {
+        "unknown_slash_command"
+    } else if message.starts_with("command_not_found:") {
+        "command_not_found"
+    } else if message.contains("missing Anthropic credentials") {
         "missing_credentials"
     } else if message.contains("Manifest source files are missing") {
         "missing_manifests"
@@ -356,8 +363,9 @@ fn classify_error_kind(message: &str) -> &'static str {
         // #765: removed subcommands (login, logout) — hint contains migration guidance
         "removed_subcommand"
     } else if message.starts_with("unknown subcommand:") {
-        // #785: typo/unknown top-level subcommand (e.g. `claw dump` → did you mean dump-manifests?)
-        "unknown_subcommand"
+        // #785/#825: typo/unknown top-level subcommand (e.g. `claw dump` → did you mean dump-manifests?)
+        // Unified under command_not_found in #825.
+        "command_not_found"
     } else if message.starts_with("unexpected extra arguments")
         || message.starts_with("unexpected_extra_args:")
     {
@@ -529,6 +537,16 @@ fn plugin_load_failure_json(failure: &plugins::PluginLoadFailure) -> Value {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    // #824: suppress config deprecation prose warnings to stderr when JSON
+    // output mode is active.  Scan the raw argv before parse_args so the
+    // suppression is in place before any settings file is loaded.
+    let json_mode = args
+        .windows(2)
+        .any(|w| w[0] == "--output-format" && w[1] == "json")
+        || args.iter().any(|a| a == "--output-format=json");
+    if json_mode {
+        runtime::suppress_config_warnings_for_json_mode();
+    }
     match parse_args(&args)? {
         CliAction::DumpManifests {
             output_format,
@@ -1362,17 +1380,23 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         ),
         other => {
             if rest.len() == 1 && looks_like_subcommand_typo(other) {
+                // #825: always emit a command_not_found error for
+                // single-word all-alpha/dash tokens that don't match any
+                // known subcommand — with or without close suggestions.
+                // Multi-word cases fall through to CliAction::Prompt so
+                // natural language prompts like `claw explain this` work.
+                // (#826 documents the multi-word gap as a known limitation.)
+                let mut message = format!("command_not_found: unknown subcommand: {other}.");
                 if let Some(suggestions) = suggest_similar_subcommand(other) {
-                    let mut message = format!("unknown subcommand: {other}.");
                     if let Some(line) = render_suggestion_line("Did you mean", &suggestions) {
                         message.push('\n');
                         message.push_str(&line);
                     }
-                    message.push_str(
-                        "\nRun `claw --help` for the full list. If you meant to send a prompt literally, use `claw prompt <text>`.",
-                    );
-                    return Err(message);
                 }
+                message.push_str(
+                    "\nRun `claw --help` for the full list. If you meant to send a prompt literally, use `claw prompt <text>`.",
+                );
+                return Err(message);
             }
             // #147: guard empty/whitespace-only prompts at the fallthrough
             // path the same way `"prompt"` arm above does. Without this,
@@ -1715,15 +1739,42 @@ fn parse_direct_slash_cli_action(
                 }),
             }
         }
-        Ok(Some(SlashCommand::Unknown(name))) => Err(format_unknown_direct_slash_command(&name)),
+        Ok(Some(SlashCommand::Unknown(name))) => {
+            // #828: /approve and /deny are valid REPL-only slash commands that
+            // are not SlashCommand enum variants (they require an active tool
+            // call in the REPL to be meaningful). Emit interactive_only so
+            // machine consumers see the correct error_kind instead of
+            // unknown_slash_command.
+            if matches!(name.as_str(), "approve" | "yes" | "y" | "deny" | "no" | "n") {
+                Err(format!(
+                    "interactive_only: /{name} requires an active tool call in the REPL.\nStart `claw` and use /{name} to approve or deny a pending tool execution."
+                ))
+            } else {
+                Err(format_unknown_direct_slash_command(&name))
+            }
+        }
         Ok(Some(command)) => Err({
             let _ = command;
-            format!(
-                // #738: newline before remediation so split_error_hint populates hint field
-                "slash command {command_name} is interactive-only.\nStart `claw` and run it there, or use `claw --resume SESSION.jsonl {command_name}` / `claw --resume {latest} {command_name}` when the command is marked [resume] in /help.",
-                command_name = rest[0],
-                latest = LATEST_SESSION_REFERENCE,
-            )
+            let command_name = &rest[0];
+            // #829: only suggest --resume when the command is actually
+            // resume-safe. Non-resume-safe commands (e.g. /commit, /pr)
+            // previously suggested --resume, which just re-triggered
+            // interactive_only on a second invocation.
+            let bare_name = command_name.trim_start_matches('/');
+            let is_resume_safe = commands::resume_supported_slash_commands()
+                .iter()
+                .any(|spec| spec.name == bare_name);
+            if is_resume_safe {
+                format!(
+                    // #738: newline before remediation so split_error_hint populates hint field
+                    "interactive_only: slash command {command_name} requires a live session.\nStart `claw` and run it there, or use `claw --resume SESSION.jsonl {command_name}` / `claw --resume {latest} {command_name}`.",
+                    latest = LATEST_SESSION_REFERENCE,
+                )
+            } else {
+                format!(
+                    "interactive_only: slash command {command_name} requires a live REPL session.\nStart `claw` and run it there."
+                )
+            }
         }),
         Ok(None) => Err(format!("unknown subcommand: {}", rest[0])),
         Err(error) => Err(error.to_string()),
@@ -1742,7 +1793,10 @@ fn format_unknown_option(option: &str) -> String {
 }
 
 fn format_unknown_direct_slash_command(name: &str) -> String {
-    let mut message = format!("unknown slash command outside the REPL: /{name}");
+    // #827: prefix with classifier-friendly token so classify_error_kind
+    // returns "unknown_slash_command" instead of the opaque fallback.
+    let mut message =
+        format!("unknown_slash_command: unknown slash command outside the REPL: /{name}");
     if let Some(suggestions) = render_suggestion_line("Did you mean", &suggest_slash_commands(name))
     {
         message.push('\n');
@@ -1757,7 +1811,9 @@ fn format_unknown_direct_slash_command(name: &str) -> String {
 }
 
 fn format_unknown_slash_command(name: &str) -> String {
-    let mut message = format!("Unknown slash command: /{name}");
+    // #827: prefix with classifier-friendly token so classify_error_kind
+    // can return "unknown_slash_command" instead of the opaque fallback.
+    let mut message = format!("unknown_slash_command: Unknown slash command: /{name}");
     if let Some(suggestions) = render_suggestion_line("Did you mean", &suggest_slash_commands(name))
     {
         message.push('\n');
@@ -3401,7 +3457,9 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                 // #787: fall back to kind-derived hint when message has no \n delimiter
                 let hint =
                     inline_hint.or_else(|| fallback_hint_for_error_kind(kind).map(String::from));
-                eprintln!(
+                // #819: JSON mode resume errors go to stdout for parity with other
+                // non-interactive command guards.
+                println!(
                     "{}",
                     serde_json::json!({
                         "kind": kind,
@@ -3459,7 +3517,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                 .unwrap_or("");
             if STUB_COMMANDS.contains(&cmd_root) {
                 if output_format == CliOutputFormat::Json {
-                    eprintln!(
+                    println!(
                         "{}",
                         serde_json::json!({
                             "kind": "unsupported_command",
@@ -3482,7 +3540,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
             Ok(Some(command)) => command,
             Ok(None) => {
                 if output_format == CliOutputFormat::Json {
-                    eprintln!(
+                    println!(
                         "{}",
                         serde_json::json!({
                             "kind": "unsupported_resumed_command",
@@ -3502,7 +3560,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
             }
             Err(error) => {
                 if output_format == CliOutputFormat::Json {
-                    eprintln!(
+                    println!(
                         "{}",
                         serde_json::json!({
                             "kind": "cli_parse",
@@ -3552,7 +3610,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                     // #787: fall back to kind-derived hint when error has no \n delimiter
                     let hint = inline_hint
                         .or_else(|| fallback_hint_for_error_kind(error_kind).map(String::from));
-                    eprintln!(
+                    println!(
                         "{}",
                         serde_json::json!({
                             "kind": error_kind,
@@ -12577,7 +12635,7 @@ mod tests {
         let typo_err = parse_args(&["sttaus".to_string()])
             .expect_err("typo'd subcommand should be caught by #108 guard");
         assert!(
-            typo_err.starts_with("unknown subcommand:"),
+            typo_err.contains("unknown subcommand:"),
             "typo guard should fire for 'sttaus', got: {typo_err}"
         );
         // #148: `--model` flag must be captured as model_flag_raw so status
@@ -13232,10 +13290,10 @@ mod tests {
             classify_error_kind("unrecognized argument `--foo` for subcommand `doctor`"),
             "cli_parse"
         );
-        // #785: unknown top-level subcommand (typo or unrecognised command)
+        // #785/#825: unknown top-level subcommand (typo or unrecognised command)
         assert_eq!(
             classify_error_kind("unknown subcommand: dump.\nDid you mean     dump-manifests"),
-            "unknown_subcommand"
+            "command_not_found" // #825: unified from unknown_subcommand
         );
         assert_eq!(
             classify_error_kind("unsupported ACP invocation. Use `claw acp`."),
@@ -13869,8 +13927,15 @@ mod tests {
         );
         let error = parse_args(&["/status".to_string()])
             .expect_err("/status should remain REPL-only when invoked directly");
-        assert!(error.contains("interactive-only"));
-        assert!(error.contains("claw --resume SESSION.jsonl /status"));
+        // #829: prefix changed from "interactive-only" to "interactive_only:"
+        assert!(
+            error.contains("interactive_only:"),
+            "expected interactive_only: prefix, got: {error}"
+        );
+        assert!(
+            error.contains("claw --resume SESSION.jsonl /status"),
+            "expected --resume suggestion for resume-safe /status, got: {error}"
+        );
     }
 
     #[test]
@@ -13892,8 +13957,9 @@ mod tests {
         for alias in ["/plugin", "/plugins", "/marketplace"] {
             let error = parse_args(&[alias.to_string()])
                 .expect_err("valid plugin slash aliases are local/interactive, never prompts");
+            // #829: prefix changed from "interactive-only" to "interactive_only:"
             assert!(
-                error.contains("interactive-only"),
+                error.contains("interactive_only:") || error.contains("interactive-only"),
                 "{alias} should reject as an interactive plugin command outside the REPL, got: {error}"
             );
         }

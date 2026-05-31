@@ -1745,13 +1745,15 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
         !out.status.success(),
         "invalid reasoning-effort must exit non-zero"
     );
-    let raw = String::from_utf8_lossy(&out.stderr)
+    // #819/#820/#823: abort envelopes route to stdout in JSON mode
+    let raw = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter(|l| l.starts_with('{'))
         .collect::<Vec<_>>()
         .join("");
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
-        .unwrap_or_else(|_| panic!("invalid --reasoning-effort must emit JSON; got: {raw}"));
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
+        panic!("invalid --reasoning-effort must emit JSON to stdout; got: {raw}")
+    });
     assert_eq!(
         parsed["error_kind"], "invalid_flag_value",
         "invalid --reasoning-effort must be invalid_flag_value (#756): {parsed}"
@@ -1773,13 +1775,13 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
         !out2.status.success(),
         "missing --model value must exit non-zero"
     );
-    let raw2 = String::from_utf8_lossy(&out2.stderr)
+    let raw2 = String::from_utf8_lossy(&out2.stdout)
         .lines()
         .filter(|l| l.starts_with('{'))
         .collect::<Vec<_>>()
         .join("");
     let parsed2: serde_json::Value = serde_json::from_str(&raw2)
-        .unwrap_or_else(|_| panic!("missing --model value must emit JSON; got: {raw2}"));
+        .unwrap_or_else(|_| panic!("missing --model value must emit JSON to stdout; got: {raw2}"));
     assert_eq!(
         parsed2["error_kind"], "missing_flag_value",
         "missing --model value must be missing_flag_value (#756): {parsed2}"
@@ -1816,14 +1818,15 @@ fn short_p_flag_swallows_no_flags_755() {
         !output.status.success(),
         "claw -p hello --output-format json must exit non-zero (no credentials)"
     );
-    let raw = String::from_utf8_lossy(&output.stderr)
+    // #819/#820/#823: abort envelopes route to stdout in JSON mode
+    let raw = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| l.starts_with('{'))
         .collect::<Vec<_>>()
         .join("");
     // Must be valid JSON (i.e. --output-format json was parsed, not swallowed)
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
-        panic!("--output-format json must be parsed as a flag, not prompt text; stderr: {raw}")
+        panic!("--output-format json must be parsed as a flag, not prompt text; stdout: {raw}")
     });
     assert_eq!(
         parsed["error_kind"], "missing_credentials",
@@ -1836,13 +1839,13 @@ fn short_p_flag_swallows_no_flags_755() {
         .args(["--output-format", "json", "-p", "--model", "sonnet"])
         .output()
         .expect("claw -p flag-as-prompt should run");
-    let raw2 = String::from_utf8_lossy(&output2.stderr)
+    let raw2 = String::from_utf8_lossy(&output2.stdout)
         .lines()
         .filter(|l| l.starts_with('{'))
         .collect::<Vec<_>>()
         .join("");
     let parsed2: serde_json::Value = serde_json::from_str(&raw2)
-        .unwrap_or_else(|_| panic!("claw -p --model must emit JSON; got: {raw2}"));
+        .unwrap_or_else(|_| panic!("claw -p --model must emit JSON to stdout; got: {raw2}"));
     assert_eq!(
         parsed2["error_kind"], "missing_prompt",
         "flag-like token after -p must be rejected as missing_prompt (#755): {parsed2}"
@@ -2038,13 +2041,13 @@ fn export_json_has_kind_702() {
             "export status must be ok or error"
         );
     } else {
-        // Error envelope on stderr must be parseable JSON.
-        assert!(
-            !stderr.is_empty(),
-            "export failure must emit JSON to stderr"
-        );
+        // #819: Error envelope in JSON mode must be on stdout (not stderr).
+        let stdout_json = stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .expect("export failure must emit JSON to stdout (#819)");
         let parsed: serde_json::Value =
-            serde_json::from_str(&stderr).expect("export error stderr must be valid JSON");
+            serde_json::from_str(stdout_json).expect("export error stdout must be valid JSON");
         assert_eq!(
             parsed["type"], "error",
             "export error envelope must have type:error"
@@ -2069,11 +2072,13 @@ fn config_parse_error_has_typed_error_kind_and_hint_764() {
         !output.status.success(),
         "malformed settings.json should cause non-zero exit"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_line = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
-        .expect("stderr should contain a JSON error envelope");
+        .expect("stdout should contain a JSON error envelope (#819/#820/#823: abort envelopes route to stdout in JSON mode)");
     let parsed: serde_json::Value =
         serde_json::from_str(json_line).expect("error envelope should be valid JSON");
 
@@ -2102,11 +2107,13 @@ fn login_logout_removed_subcommands_have_error_kind_and_hint_765() {
             !output.status.success(),
             "claw {subcmd} should exit non-zero"
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
-            .unwrap_or_else(|| panic!("claw {subcmd} stderr should contain a JSON envelope"));
+            .unwrap_or_else(|| panic!("claw {subcmd} stdout should contain a JSON envelope (#819/#820/#823: abort envelopes route to stdout in JSON mode)"));
         let parsed: serde_json::Value =
             serde_json::from_str(json_line).expect("error envelope should be valid JSON");
 
@@ -2190,17 +2197,18 @@ fn assert_diff_unexpected_extra_args_json(root: &Path, args: &[&str], label: &st
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        output.stdout.is_empty(),
-        "{label} should not enter the spinner/prompt path; stdout:\n{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    // #819/#820/#823: JSON abort envelopes route to stdout
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_line = stderr
+    assert!(
+        stderr.lines().all(|l| !l.trim_start().starts_with('{')),
+        "{label} stderr should not contain a JSON envelope in JSON mode (#819/#820/#823); stderr:\n{stderr}"
+    );
+    let json_line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .unwrap_or_else(|| {
-            panic!("{label} stderr should contain a JSON error envelope; stderr:\n{stderr}")
+            panic!("{label} stdout should contain a JSON error envelope (#819/#820/#823); stdout:\n{stdout}")
         });
     let parsed: serde_json::Value =
         serde_json::from_str(json_line).expect("error envelope should be valid JSON");
@@ -2239,11 +2247,13 @@ fn resume_non_slash_trailing_arg_has_typed_error_kind_and_hint_768() {
         !output.status.success(),
         "claw --resume latest compact should exit non-zero"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_line = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
-        .expect("stderr should contain a JSON error envelope");
+        .expect("stdout should contain a JSON error envelope (#819/#820/#823: abort envelopes route to stdout in JSON mode)");
     let parsed: serde_json::Value =
         serde_json::from_str(json_line).expect("error envelope should be valid JSON");
 
@@ -2277,8 +2287,10 @@ fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767(
             !output.status.success(),
             "claw session {sub} should exit non-zero"
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .unwrap_or_else(|| panic!("claw session {sub} stderr should contain JSON"));
@@ -2330,8 +2342,10 @@ fn slash_only_verbs_with_args_return_interactive_only_not_credentials_770() {
             "claw {} should exit non-zero",
             args.join(" ")
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .unwrap_or_else(|| {
@@ -2370,8 +2384,10 @@ fn agents_plugins_mcp_unknown_subcommand_have_hint_774() {
     {
         let output = run_claw(&root, &["--output-format", "json", "agents", "bogus"], &[]);
         assert!(!output.status.success(), "agents bogus should fail");
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .expect("agents bogus should emit JSON error");
@@ -2392,8 +2408,10 @@ fn agents_plugins_mcp_unknown_subcommand_have_hint_774() {
     {
         let output = run_claw(&root, &["--output-format", "json", "plugins", "bogus"], &[]);
         assert!(!output.status.success(), "plugins bogus should fail");
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .expect("plugins bogus should emit JSON error");
@@ -2412,6 +2430,7 @@ fn agents_plugins_mcp_unknown_subcommand_have_hint_774() {
         assert!(!output.status.success(), "mcp bogus should fail");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let json_str = if stdout.trim().starts_with('{') {
             stdout.to_string()
         } else {
@@ -2470,8 +2489,10 @@ fn interactive_only_guard_batch_769_to_771() {
             "claw {} should exit non-zero",
             args.join(" ")
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .unwrap_or_else(|| {
@@ -2532,12 +2553,14 @@ fn resume_plugin_mutations_are_typed_interactive_only_777() {
             !output.status.success(),
             "/plugins {mutation} in resume mode should exit non-zero"
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let json_line = stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
             .unwrap_or_else(|| {
-                panic!("/plugins {mutation} should emit JSON error, got stderr: {stderr}")
+                panic!("/plugins {mutation} should emit JSON error on stdout, got: {stderr}")
             });
         let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
         assert_eq!(
@@ -2587,12 +2610,14 @@ fn resume_skills_invocation_is_typed_interactive_only_779() {
         !output.status.success(),
         "/skills <skill> in resume mode should exit non-zero"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_line = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .unwrap_or_else(|| {
-            panic!("/skills invocation should emit JSON error, got stderr: {stderr}")
+            panic!("/skills invocation should emit JSON error on stdout, got: {stderr}")
         });
     let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
     assert_eq!(
@@ -2626,8 +2651,10 @@ fn acp_unsupported_invocation_has_hint_782() {
 
     let output = run_claw(&root, &["--output-format", "json", "acp", "start"], &[]);
     assert!(!output.status.success(), "acp start should fail");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_line = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .expect("should emit JSON error");
@@ -2664,6 +2691,7 @@ fn init_json_envelope_has_hint_and_already_initialized_783() {
     assert!(output.status.success(), "init should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let raw = if stdout.trim_start().starts_with('{') {
         &*stdout
     } else {
@@ -2697,6 +2725,7 @@ fn init_json_envelope_has_hint_and_already_initialized_783() {
     assert!(output2.status.success(), "re-init should succeed");
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
     let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
     let raw2 = if stdout2.trim_start().starts_with('{') {
         &*stdout2
     } else {
@@ -2739,7 +2768,8 @@ fn export_arg_errors_have_typed_kind_and_hint_784() {
     );
     assert!(!out1.status.success(), "--output with no value should fail");
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
-    let j1: serde_json::Value = stderr1
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let j1: serde_json::Value = stdout1
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -2765,7 +2795,8 @@ fn export_arg_errors_have_typed_kind_and_hint_784() {
     );
     assert!(!out2.status.success(), "extra positional should fail");
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    let j2: serde_json::Value = stderr2
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let j2: serde_json::Value = stdout2
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -2801,14 +2832,16 @@ fn unknown_subcommand_returns_typed_kind_785() {
     let output = run_claw(&root, &["--output-format", "json", "dump"], &[]);
     assert!(!output.status.success(), "unknown subcommand should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
         .expect("unknown subcommand should emit JSON error");
+    // #825: unified under command_not_found (previously unknown_subcommand)
     assert_eq!(
-        j["error_kind"], "unknown_subcommand",
-        "unknown subcommand should return unknown_subcommand kind, got {:?}",
+        j["error_kind"], "command_not_found",
+        "unknown subcommand should return command_not_found kind (#825), got {:?}",
         j["error_kind"]
     );
     // hint should point at the suggestion and/or --help
@@ -2847,7 +2880,8 @@ fn dump_manifests_missing_dir_has_typed_kind_and_hint_786() {
     );
     assert!(!out1.status.success());
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
-    let j1: serde_json::Value = stderr1
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let j1: serde_json::Value = stdout1
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -2878,7 +2912,8 @@ fn dump_manifests_missing_dir_has_typed_kind_and_hint_786() {
     );
     assert!(!out2.status.success());
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    let j2: serde_json::Value = stderr2
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let j2: serde_json::Value = stdout2
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -2927,7 +2962,8 @@ fn resume_directory_path_returns_typed_kind_and_hint_787() {
         "resume with directory should fail"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -2977,6 +3013,7 @@ fn skills_show_not_found_emits_single_json_object_788() {
     // After fix: stdout has 1 JSON object, stderr has none (no duplicate).
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Count JSON objects in stdout — must be exactly 1
     let json_objects: Vec<serde_json::Value> = {
@@ -3137,7 +3174,8 @@ fn system_prompt_unknown_option_returns_typed_kind_790() {
     );
     assert!(!out1.status.success());
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
-    let j1: serde_json::Value = stderr1
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let j1: serde_json::Value = stdout1
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3163,7 +3201,8 @@ fn system_prompt_unknown_option_returns_typed_kind_790() {
     );
     assert!(!out2.status.success());
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    let j2: serde_json::Value = stderr2
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let j2: serde_json::Value = stdout2
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3200,7 +3239,8 @@ fn config_extra_args_have_non_null_hint_791() {
     );
     assert!(!out1.status.success());
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
-    let j1: serde_json::Value = stderr1
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let j1: serde_json::Value = stdout1
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3233,7 +3273,8 @@ fn config_extra_args_have_non_null_hint_791() {
     );
     assert!(!out2.status.success());
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    let j2: serde_json::Value = stderr2
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let j2: serde_json::Value = stdout2
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3418,7 +3459,8 @@ fn plugins_uninstall_not_found_has_hint_793() {
     );
     // Error envelope goes to stderr (propagated via ? to main error handler)
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3462,7 +3504,8 @@ fn plugins_install_not_found_path_returns_typed_kind_794() {
         "plugins install not-found-path must exit non-zero (#794)"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3508,7 +3551,8 @@ fn skills_install_not_found_and_unsupported_action_have_hints_795() {
         "skills install not-found must exit non-zero (#795)"
     );
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
-    let j1: serde_json::Value = stderr1
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let j1: serde_json::Value = stdout1
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3543,7 +3587,8 @@ fn skills_install_not_found_and_unsupported_action_have_hints_795() {
         "skills uninstall must exit non-zero (#795)"
     );
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    let j2: serde_json::Value = stderr2
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let j2: serde_json::Value = stdout2
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3680,7 +3725,8 @@ fn plugins_extra_args_have_non_null_hint_797() {
         "plugins show with extra arg must exit non-zero (#797)"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3744,6 +3790,7 @@ fn plugins_list_trailing_dash_text_error_stays_on_stderr_817() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stderr.contains("[error-kind: cli_parse]"), "{stderr}");
     assert!(
         stderr.contains("unknown option for `claw plugins list`: --"),
@@ -3769,7 +3816,8 @@ fn empty_prompt_has_non_null_hint_798() {
         "empty prompt must exit non-zero (#798)"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
@@ -3816,5 +3864,193 @@ fn diff_non_git_dir_has_error_kind_and_hint_801() {
     assert!(
         j["message"].as_str().is_some(),
         "diff non-git must have message field (#801)"
+    );
+}
+
+// #825: unknown single-word subcommand must return command_not_found, not
+// fall through to missing_credentials after provider startup.
+#[test]
+fn unknown_subcommand_json_emits_command_not_found() {
+    let root = unique_temp_dir("unknown-cmd-json-825");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let output = run_claw(&root, &["--output-format", "json", "foobar"], &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unknown subcommand should exit 1"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.trim().is_empty(),
+        "unknown subcommand JSON envelope must be on stdout"
+    );
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be parseable JSON (#825)");
+    assert_eq!(
+        j["error_kind"], "command_not_found",
+        "unknown subcommand must emit command_not_found, not missing_credentials (#825): {j}"
+    );
+    assert_eq!(j["status"], "error");
+    assert!(
+        stderr.is_empty(),
+        "unknown subcommand in JSON mode must have empty stderr (#825), got: {stderr:?}"
+    );
+}
+
+#[test]
+fn unknown_subcommand_text_emits_command_not_found_on_stderr() {
+    let root = unique_temp_dir("unknown-cmd-text-825");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let output = run_claw(&root, &["foobar"], &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unknown subcommand should exit 1"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _ = stdout;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("command_not_found"),
+        "text mode unknown subcommand must mention command_not_found on stderr (#825), got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("missing_credentials"),
+        "text mode unknown subcommand must not show missing_credentials (#825)"
+    );
+}
+
+#[test]
+fn unknown_subcommand_typo_with_suggestions_json_emits_command_not_found() {
+    let root = unique_temp_dir("unknown-cmd-typo-825");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let output = run_claw(&root, &["--output-format", "json", "statuz"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("typo envelope must be valid JSON (#825)");
+    assert_eq!(j["error_kind"], "command_not_found", "#825 typo: {j}");
+    let hint = j["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("status") || hint.contains("state"),
+        "typo hint should suggest status/state, got: {hint:?}"
+    );
+    assert!(stderr.is_empty(), "typo JSON must have empty stderr (#825)");
+}
+
+// #826: multi-word unknown subcommand is a known gap — falls through to
+// CliAction::Prompt (natural language prompt passthrough like `claw explain this`).
+// Single-word typos (#825) are caught; multi-word is documented as backlog.
+// This test documents the current behaviour (not the desired fix).
+#[test]
+fn multi_word_unknown_subcommand_falls_through_to_prompt_826() {
+    let root = unique_temp_dir("multi-word-gap-826");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    // "foobar baz" has no fuzzy suggestion → falls through to Prompt path
+    // (hits missing_credentials since no API key is set, rc=1)
+    let output = run_claw(&root, &["--output-format", "json", "foobar", "baz"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Currently emits missing_credentials (fallthrough gap documented in #826)
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("multi-word fallthrough must emit JSON");
+    assert_eq!(
+        j["status"], "error",
+        "multi-word fallthrough must be an error: {j}"
+    );
+    // stderr must be empty regardless (JSON mode)
+    assert!(
+        stderr.is_empty(),
+        "multi-word fallthrough JSON must have empty stderr: {stderr:?}"
+    );
+}
+
+// #827: direct /unknown-slash-command must emit typed error_kind, not "unknown"
+// Uses the direct-slash CLI path (no session load needed; reproducible on CI).
+#[test]
+fn direct_unknown_slash_command_emits_typed_error_kind() {
+    let root = unique_temp_dir("direct-unknown-slash-827");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let output = run_claw(&root, &["--output-format", "json", "/boguscommand"], &[]);
+    assert_eq!(output.status.code(), Some(1), "unknown slash should exit 1");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("unknown slash must emit JSON (#827)");
+    assert_ne!(
+        j["error_kind"], "unknown",
+        "direct unknown slash must not emit opaque \'unknown\' error_kind (#827): {j}"
+    );
+    assert_eq!(
+        j["error_kind"], "unknown_slash_command",
+        "direct unknown slash must emit unknown_slash_command (#827): {j}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "direct unknown slash JSON must have empty stderr (#827)"
+    );
+}
+
+// #828: /approve and /deny outside REPL must emit interactive_only, not unknown_slash_command
+#[test]
+fn approve_deny_outside_repl_emits_interactive_only() {
+    let root = unique_temp_dir("approve-deny-828");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    for cmd in &["/approve", "/yes", "/deny", "/no"] {
+        let output = run_claw(&root, &["--output-format", "json", cmd], &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let j: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|_| panic!("{cmd} must emit JSON (#828), got: {stdout:?}"));
+        assert_eq!(
+            j["error_kind"], "interactive_only",
+            "{cmd} outside REPL must emit interactive_only (#828): {j}"
+        );
+        assert!(
+            stderr.is_empty(),
+            "{cmd} JSON must have empty stderr (#828): {stderr:?}"
+        );
+    }
+}
+
+// #829: interactive_only hint must NOT suggest --resume for non-resume-safe commands
+#[test]
+fn non_resume_safe_interactive_only_hint_omits_resume_suggestion() {
+    let root = unique_temp_dir("non-resume-hint-829");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    // /commit, /pr, /issue, /bughunter, /ultraplan are not resume-safe
+    for cmd in &["/commit", "/pr", "/issue", "/bughunter", "/ultraplan"] {
+        let output = run_claw(&root, &["--output-format", "json", cmd], &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let j: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|_| panic!("{cmd} must emit JSON (#829), got: {stdout:?}"));
+        assert_eq!(
+            j["error_kind"], "interactive_only",
+            "{cmd} must emit interactive_only (#829): {j}"
+        );
+        let hint = j["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.contains("--resume"),
+            "{cmd} hint must not suggest --resume for non-resume-safe command (#829): hint={hint:?}"
+        );
+    }
+}
+
+// #829: resume-safe commands should still suggest --resume in the hint
+#[test]
+fn resume_safe_interactive_only_hint_includes_resume_suggestion() {
+    let root = unique_temp_dir("resume-hint-829");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    let output = run_claw(&root, &["--output-format", "json", "/diff"], &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("/diff must emit JSON (#829), got: {stdout:?}"));
+    let hint = j["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("--resume"),
+        "/diff hint must suggest --resume (it is resume-safe) (#829): hint={hint:?}"
     );
 }
