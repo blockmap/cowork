@@ -9683,6 +9683,7 @@ fn build_runtime_with_plugin_state(
     plugin_registry.initialize()?;
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
+    let extra_headers = feature_config.request_options().headers.clone();
     let mut runtime = ConversationRuntime::new_with_features(
         session,
         AnthropicRuntimeClient::new(
@@ -9693,6 +9694,7 @@ fn build_runtime_with_plugin_state(
             allowed_tools.clone(),
             tool_registry.clone(),
             progress_reporter,
+            extra_headers,
         )?,
         CliToolExecutor::new(
             allowed_tools.clone(),
@@ -9820,6 +9822,7 @@ impl AnthropicRuntimeClient {
         allowed_tools: Option<AllowedToolSet>,
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
+        extra_headers: std::collections::BTreeMap<String, String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Dispatch to the correct provider at construction time.
         // `ApiProviderClient` (exposed by the api crate as
@@ -9860,7 +9863,11 @@ impl AnthropicRuntimeClient {
                 // OpenRouter, xAI, DashScope, Ollama, and any other
                 // OpenAI-compat endpoint users configure via
                 // `OPENAI_BASE_URL` / `XAI_BASE_URL` / `DASHSCOPE_BASE_URL`.
-                ApiProviderClient::from_model_with_anthropic_auth(&resolved_model, None)?
+                ApiProviderClient::from_model_with_auth_and_headers(
+                    &resolved_model,
+                    None,
+                    extra_headers,
+                )?
             }
         };
         Ok(Self {

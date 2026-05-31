@@ -507,6 +507,49 @@ cd rust
 
 Useful interactive commands include `/help`, `/status`, `/cost`, `/config`, `/session`, `/model`, `/permissions`, and `/export`.
 
+## Request Options (Custom Headers)
+
+You can configure custom HTTP headers for API requests through the `requestOptions` field in your configuration file. This is useful when you need to add authentication headers, custom metadata, or other headers required by your API gateway or proxy.
+
+### Configuration
+
+Add `requestOptions` to any of your configuration files (see [Config file resolution order](#config-file-resolution-order)):
+
+```json
+{
+  "requestOptions": {
+    "headers": {
+      "X-Custom-Header": "custom-value",
+      "X-API-Key": "additional-key"
+    }
+  }
+}
+```
+
+### Example: Ollama with Custom Headers
+
+For local Ollama deployments that require additional headers:
+
+```json
+{
+  "model": "openai/llama3.2",
+  "requestOptions": {
+    "headers": {
+      "Authorization": "Bearer ollama"
+    }
+  }
+}
+```
+
+```bash
+export OPENAI_BASE_URL="http://192.168.68.213:19000/v1"
+
+cd rust
+./target/debug/claw --model "openai/llama3.2" prompt "hello"
+```
+
+The custom headers will be included in all OpenAI-compatible API requests, allowing you to connect to services that require additional authentication or metadata beyond the standard API key.
+
 ## Config file resolution order
 
 Runtime config is loaded in this order, with later entries overriding earlier ones:

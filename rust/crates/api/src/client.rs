@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AuthSource};
@@ -32,9 +34,6 @@ impl ProviderClient {
                 OpenAiCompatConfig::xai(),
             )?)),
             ProviderKind::OpenAi => {
-                // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
-                // speak the OpenAI wire format, but they need the DashScope config which
-                // reads DASHSCOPE_API_KEY and points at dashscope.aliyuncs.com.
                 let config = match providers::metadata_for_model(&resolved_model) {
                     Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
                         OpenAiCompatConfig::dashscope()
@@ -42,6 +41,35 @@ impl ProviderClient {
                     _ => OpenAiCompatConfig::openai(),
                 };
                 Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
+            }
+        }
+    }
+
+    pub fn from_model_with_auth_and_headers(
+        model: &str,
+        anthropic_auth: Option<AuthSource>,
+        extra_headers: BTreeMap<String, String>,
+    ) -> Result<Self, ApiError> {
+        let resolved_model = providers::resolve_model_alias(model);
+        match providers::detect_provider_kind(&resolved_model) {
+            ProviderKind::Anthropic => Ok(Self::Anthropic(match anthropic_auth {
+                Some(auth) => AnthropicClient::from_auth(auth),
+                None => AnthropicClient::from_env()?,
+            })),
+            ProviderKind::Xai => Ok(Self::Xai(
+                OpenAiCompatClient::from_env(OpenAiCompatConfig::xai())?
+                    .with_headers(extra_headers),
+            )),
+            ProviderKind::OpenAi => {
+                let config = match providers::metadata_for_model(&resolved_model) {
+                    Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
+                        OpenAiCompatConfig::dashscope()
+                    }
+                    _ => OpenAiCompatConfig::openai(),
+                };
+                Ok(Self::OpenAi(
+                    OpenAiCompatClient::from_env(config)?.with_headers(extra_headers),
+                ))
             }
         }
     }

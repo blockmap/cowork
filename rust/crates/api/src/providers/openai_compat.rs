@@ -106,6 +106,7 @@ pub struct OpenAiCompatClient {
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
+    extra_headers: BTreeMap<String, String>,
 }
 
 impl OpenAiCompatClient {
@@ -127,6 +128,7 @@ impl OpenAiCompatClient {
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
+            extra_headers: BTreeMap::new(),
         }
     }
 
@@ -162,6 +164,12 @@ impl OpenAiCompatClient {
         self.max_retries = max_retries;
         self.initial_backoff = initial_backoff;
         self.max_backoff = max_backoff;
+        self
+    }
+
+    #[must_use]
+    pub fn with_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        self.extra_headers = headers;
         self
     }
 
@@ -277,10 +285,17 @@ impl OpenAiCompatClient {
         check_request_body_size_for_base_url(request, self.config(), &self.base_url)?;
 
         let request_url = chat_completions_endpoint(&self.base_url);
-        self.http
+        let mut request_builder = self
+            .http
             .post(&request_url)
             .header("content-type", "application/json")
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&self.api_key);
+
+        for (key, value) in &self.extra_headers {
+            request_builder = request_builder.header(key, value);
+        }
+
+        request_builder
             .json(&build_chat_completion_request_for_base_url(
                 request,
                 self.config(),
