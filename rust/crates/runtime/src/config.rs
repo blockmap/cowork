@@ -1433,14 +1433,9 @@ fn parse_bool_map(value: &JsonValue, context: &str) -> Result<BTreeMap<String, b
         .collect()
 }
 
-fn parse_string_map(value: &Option<&JsonValue>, context: &str) -> Result<Option<BTreeMap<String, String>>, ConfigError> {
-    let Some(value) = value else {
+fn parse_string_map(value: Option<&JsonValue>, context: &str) -> Result<Option<BTreeMap<String, String>>, ConfigError> {
+    let Some(map) = value.and_then(|v| v.as_object()) else {
         return Ok(None);
-    };
-    let Some(map) = value.as_object() else {
-        return Err(ConfigError::Parse(format!(
-            "{context}: expected JSON object"
-        )));
     };
     let result: Result<BTreeMap<String, String>, ConfigError> = map.iter()
         .map(|(key, value)| {
